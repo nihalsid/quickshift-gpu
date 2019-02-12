@@ -9,13 +9,25 @@
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
+#include <chrono>
+#include <thread>
 #include "quickshift_common.h"
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true)
+{
+	if (code != cudaSuccess)
+	{
+		fprintf(stderr, "GPUassert: %d %s %s %d\n", code, cudaGetErrorString(code), file, line);
+		if (abort) exit(code);
+	}
+}
 
 texture<float, 3, cudaReadModeElementType> texI;
 texture<float, 2, cudaReadModeElementType> texE;
 
-#define USE_TEX_E 1
-#define USE_TEX_I 1
+#define USE_TEX_E 0
+#define USE_TEX_I 0
 
 #if USE_TEX_I
 #define TEXI(x,y,c) tex3D(texI, x + 0.5f, y + 0.5f, c + 0.5f)
@@ -35,10 +47,10 @@ texture<float, 2, cudaReadModeElementType> texE;
   int d1 = j1 - i1 ;                          \
   int d2 = j2 - i2 ;                          \
   int k ;                                     \
-  dist += d1*d1 + d2*d2 ;                     \
+  dist += 0.2f * (d1*d1 + d2*d2) ;                     \
   for (k = 0 ; k < K ; ++k) {                 \
     float d =  v[k] - TEXI(j1,j2,k);          \
-    dist += d*d ;                             \
+    dist += 0.8f * (d*d) ;                             \
   }                                           \
 }
 
@@ -55,7 +67,6 @@ __global__ void find_neighbors_gpu(const float * I, int N1, int N2, int K, float
 	int i1 = blockIdx.y * blockDim.y + threadIdx.y;
 	int i2 = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i1 >= N1 || i2 >= N2) return; // out of bounds
-
 	int j1, j2;
 
 	/* Quickshift assigns each i to the closest j which has an increase in the
@@ -98,7 +109,7 @@ __global__ void find_neighbors_gpu(const float * I, int N1, int N2, int K, float
 	 * distance tau from the point */
 	map[i1 + N1 * i2] = j1_best + N1 * j2_best; /* + 1 ; */
 	if (map[i1 + N1 * i2] != i1 + N1 * i2)
-		gaps[i1 + N1 * i2] = sqrt(d_best);
+		gaps[i1 + N1 * i2] = sqrtf(d_best);
 	else
 		gaps[i1 + N1 * i2] = d_best; /* inf */
 }
@@ -146,7 +157,7 @@ __global__ void compute_E_gpu(const float * I, int N1, int N2, int K, int R, flo
 			float Dij;
 			distance(I, N1, N2, K, v, j1, j2, Dij);
 			/* Make distance a similarity */
-			float Fij = -exp(-Dij / (2 * sigma*sigma));
+			float Fij = -expf(-Dij / (2 * sigma*sigma));
 
 			/* E is E_i above */
 			Ei += -Fij;
@@ -190,7 +201,7 @@ void quickshift_gpu(image_t im, float sigma, float tau, float * map, float * gap
 
 	float *map_d, *E_d, *gaps_d, *I;
 
-	int verb = 0;
+	int verb = 1;
 
 	float tau2;
 
@@ -228,11 +239,11 @@ void quickshift_gpu(image_t im, float sigma, float tau, float * map, float * gap
 		printf("quickshiftGPU: tR:      %d\n", tR);
 	}
 
-	dim3 dimBlock(32, 4, 1);
+	dim3 dimBlock(32, 8, 1);
 	dim3 dimGrid(iDivUp(N2, dimBlock.x), iDivUp(N1, dimBlock.y), 1);
 	compute_E_gpu << <dimGrid, dimBlock >> > (I, N1, N2, K, R, sigma, E_d, 0, 0);
-
-	cudaThreadSynchronize();
+	gpuErrchk(cudaPeekAtLastError());
+	gpuErrchk(cudaDeviceSynchronize());
 
 	cudaMemcpy(E, E_d, size, cudaMemcpyDeviceToHost);
 
@@ -254,7 +265,9 @@ void quickshift_gpu(image_t im, float sigma, float tau, float * map, float * gap
 	cudaBindTextureToArray(texE, cu_array_E,
 		descriptionE);
 
-	cudaThreadSynchronize();
+	gpuErrchk(cudaPeekAtLastError());
+	gpuErrchk(cudaThreadSynchronize());
+
 #endif
 
 	/* -----------------------------------------------------------------
@@ -264,7 +277,8 @@ void quickshift_gpu(image_t im, float sigma, float tau, float * map, float * gap
 	find_neighbors_gpu << <dimGrid, dimBlock >> > (I, N1, N2, K, E_d, tau2,
 		tR, map_d, gaps_d);
 
-	cudaThreadSynchronize();
+	gpuErrchk(cudaPeekAtLastError());
+	gpuErrchk(cudaDeviceSynchronize());
 
 	cudaMemcpy(map, map_d, size, cudaMemcpyDeviceToHost);
 	cudaMemcpy(gaps, gaps_d, size, cudaMemcpyDeviceToHost);
@@ -275,8 +289,11 @@ void quickshift_gpu(image_t im, float sigma, float tau, float * map, float * gap
 	cudaFree(gaps_d);
 	cudaFree(E_d);
 	cudaUnbindTexture(texI);
+#if USE_TEX_I
 	cudaFreeArray(cu_array_I);
+#endif
 	cudaUnbindTexture(texE);
+#if USE_TEX_E
 	cudaFreeArray(cu_array_E);
-
+#endif 
 }
