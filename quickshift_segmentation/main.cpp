@@ -122,10 +122,9 @@ image_t imseg(image_t im, int * flatmap)
 }
 
 
-void quickshift_wrapper(Mat& image, float tau, float sigma) {
+Mat quickshift_wrapper(Mat& image, float tau, float sigma) {
 	float *map, *E, *gaps;
 	int * flatmap;
-	image_t imout;
 	unsigned int totaltimer;
 
 	int dims[3] = {image.rows, image.cols, image.channels()};
@@ -137,29 +136,20 @@ void quickshift_wrapper(Mat& image, float tau, float sigma) {
 	image_t im;
 	image_from_data(im, image);
 	quickshift_gpu(im, sigma, tau, map, gaps, E);
-	for (int p = 0; p < im.N1*im.N2; p++)
-		if (map[p] == p) {
-			//cout << "Map[" << p << "]: " << map[p] << " == " << p << " but gaps[" << p << "] = "<< gaps[p] <<" != Inf"   << endl;
-		}
-
+	
 	flatmap = map_to_flatmap(map, im.N1*im.N2);
-	imout = imseg(im, flatmap);
-
-	Mat label_image(dims[0], dims[1], CV_8UC3);
-	for (int k = 0; k < im.K; k++)
-		for (int col = 0; col < im.N2; col++)
-			for (int row = 0; row < im.N1; row++)
-			{
-				label_image.at<Vec3b>(row, col)[k] = uchar (imout.I[row + col * im.N1 + k * im.N1*im.N2] * 255./32.);
-			}
-
+	
+	Mat lbl_idx_image = imseg_assignments(im, flatmap);
 	//namedWindow("Labels");
 	//imshow("Labels", label_image);
 	//waitKey(0);
 
-	Mat lbl_idx_image = imseg_assignments(im, flatmap);
-	for (int r = 0; r < im.N1 - 1; r++) {
-		for (int c = 0; c < im.N2 - 1; c++) {
+	return lbl_idx_image;
+}
+
+void visualize(Mat& image, const Mat& lbl_idx_image) {
+	for (int r = 0; r < image.rows - 1; r++) {
+		for (int c = 0; c < image.cols - 1; c++) {
 			if ((lbl_idx_image.at<uint16_t>(r, c) != lbl_idx_image.at<uint16_t>(r, c + 1)) || (lbl_idx_image.at<uint16_t>(r, c) != lbl_idx_image.at<uint16_t>(r + 1, c))) {
 				image.at<Vec3b>(r, c)[0] = 0;
 				image.at<Vec3b>(r, c)[1] = 255;
@@ -170,15 +160,20 @@ void quickshift_wrapper(Mat& image, float tau, float sigma) {
 	namedWindow("Seg");
 	imshow("Seg", image);
 	waitKey(0);
-
-	assert(imout.N1 == dims[0]);
-	assert(imout.N2 == dims[1]);
-	assert(imout.K == 3);
 }
 
 int main(int argc, const char * argv[]) {
-	Mat image = imread("D:\\nihalsid\\Label23D-PreprocessingScripts\\files\\segmentation\\input\\frame-000005.color.jpg", IMREAD_COLOR);
-	//Mat image = imread("D:\\nihalsid\\Label23D-PreprocessingScripts\\files\\segmentation\\input-min\\test.png", IMREAD_COLOR);
-	quickshift_wrapper(image, 5.f, 3.f);
+	float tau = atof(argv[1]), sigma = atof(argv[2]);
+	bool visualizeLabels = atoi(argv[3]);
+	const char* filepath_in = argv[4];
+	const char* filepath_out = argv[5];
+	
+
+	Mat image = imread(filepath_in, IMREAD_COLOR);
+	Mat labels = quickshift_wrapper(image, tau, sigma);
+	if (visualizeLabels) {
+		visualize(image, labels);
+	}
+	imwrite(filepath_out, labels);
 	return 0;
 }
